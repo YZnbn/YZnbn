@@ -1,0 +1,1816 @@
+"""File management tools for SolidWorks MCP Server.
+
+Provides tools for managing SolidWorks files including save, save as, file properties,
+and reference management.
+"""
+
+import os
+import shutil
+from pathlib import Path
+from typing import Any
+
+from fastmcp import FastMCP
+from loguru import logger
+from pydantic import Field
+
+from ..adapters.base import SolidWorksAdapter
+from ..utils.feature_tree_classifier import (
+    build_component_tree,
+    classify_feature_tree_snapshot,
+)
+from .input_compat import CompatInput
+
+# swPackAndGoSaveStatus_e — returned (per-file) by IModelDocExtension::SavePackAndGo.
+# All zeros means every file was written successfully by SolidWorks Pack-and-Go.
+_SW_PACK_AND_GO_STATUS: dict[int, str] = {
+    0: "Ok",
+    2: "FileAlreadyExist — target file already exists and was not overwritten",
+    3: "MissingSource — source reference file could not be found",
+}
+
+
+def _decode_pack_and_go_statuses(save_result: Any) -> tuple[bool, list[str]]:
+    """Decode the SavePackAndGo per-file status array.
+
+    Returns (all_ok, human_readable_warnings).
+    """
+    if save_result is None:
+        return True, []
+    try:
+        codes = [int(c) for c in save_result]
+    except TypeError:
+        codes = [int(save_result)]
+    warnings: list[str] = []
+    for i, code in enumerate(codes):
+        if code != 0:
+            label = _SW_PACK_AND_GO_STATUS.get(code, f"Unknown status code {code}")
+            warnings.append(f"File index {i}: {label} (swPackAndGoSaveStatus_e={code})")
+    return len(warnings) == 0, warnings
+
+
+# Input schemas using Python 3.14 built-in types
+
+
+class SaveFileInput(CompatInput):
+    """Input schema for saving a file.
+
+    Attributes:
+        file_path (str | None): The file path value.
+        force_save (bool): The force save value.
+    """
+
+    force_save: bool = Field(default=True, description="Force save even if no changes")
+    file_path: str | None = Field(
+        default=None,
+        description="Optional output path. If omitted, saves the current active document.",
+    )
+
+
+class SaveAsInput(CompatInput):
+    """Input schema for save as operation.
+
+    Attributes:
+        file_path (str): The file path value.
+        format_type (str): The format type value.
+        overwrite (bool): The overwrite value.
+    """
+
+    file_path: str = Field(description="Full path for the new file")
+    format_type: str = Field(
+        default="solidworks", description="File format (solidworks, step, iges, etc.)"
+    )
+    overwrite: bool = Field(default=False, description="Overwrite existing file")
+
+
+class FileOperationInput(CompatInput):
+    """Input schema for file operations.
+
+    Attributes:
+        file_path (str | None): The file path value.
+        include_system (bool): The include system value.
+        operation (str): The operation value.
+        parameters (dict[str, Any] | None): The parameters value.
+        properties (dict[str, Any] | None): The properties value.
+        source_path (str | None): The source path value.
+        target_path (str | None): The target path value.
+    """
+
+    operation: str = Field(
+        description="Operation to perform (copy, move, delete, rename)"
+    )
+    source_path: str | None = Field(default=None, description="Source file path")
+    file_path: str | None = Field(default=None, description="Alternative file path")
+    target_path: str | None = Field(
+        default=None, description="Target file path (for copy/move/rename)"
+    )
+    properties: dict[str, Any] | None = Field(
+        default=None, description="File properties to set"
+    )
+    parameters: dict[str, Any] | None = Field(
+        default=None, description="Operation parameters"
+    )
+    include_system: bool = Field(default=False, description="Include system properties")
+
+
+class FormatConversionInput(CompatInput):
+    """Input schema for format conversion.
+
+    Attributes:
+        conversion_options (dict[str, Any] | None): The conversion options value.
+        invalid_format (str | None): The invalid format value.
+        output_path (str | None): The output path value.
+        quality (str): The quality value.
+        source_file (str): The source file value.
+        source_format (str | None): The source format value.
+        target_file (str | None): The target file value.
+        target_format (str): The target format value.
+        units (str): The units value.
+    """
+
+    source_file: str = Field(description="Source file path")
+    target_file: str | None = Field(default=None, description="Target file path")
+    source_format: str | None = Field(default=None, description="Source file format")
+    target_format: str = Field(description="Target file format")
+    output_path: str | None = Field(default=None, description="Alternative output path")
+    conversion_options: dict[str, Any] | None = Field(
+        default=None, description="Conversion options"
+    )
+    quality: str = Field(default="high", description="Conversion quality")
+    units: str = Field(default="mm", description="Units")
+    invalid_format: str | None = Field(
+        default=None, description="Invalid format for testing"
+    )
+
+
+class LoadPartInput(CompatInput):
+    """Input schema for loading a part file.
+
+    Attributes:
+        file_path (str): The file path value.
+    """
+
+    file_path: str = Field(description="Full path to the .sldprt file")
+
+
+class LoadAssemblyInput(CompatInput):
+    """Input schema for loading an assembly file.
+
+    Attributes:
+        file_path (str): The file path value.
+    """
+
+    file_path: str = Field(description="Full path to the .sldasm file")
+
+
+class SavePartInput(CompatInput):
+    """Input schema for saving a part file.
+
+    Attributes:
+        file_path (str | None): The file path value.
+        overwrite (bool): The overwrite value.
+    """
+
+    file_path: str | None = Field(
+        default=None,
+        description="Optional output path. If omitted, saves the active part to its existing location.",
+    )
+    overwrite: bool = Field(default=False, description="Overwrite existing file")
+
+
+class SaveAssemblyInput(CompatInput):
+    """Input schema for saving an assembly file.
+
+    Attributes:
+        file_path (str | None): The file path value.
+        overwrite (bool): The overwrite value.
+    """
+
+    file_path: str | None = Field(
+        default=None,
+        description="Optional output path. If omitted, saves the active assembly to its existing location.",
+    )
+    overwrite: bool = Field(default=False, description="Overwrite existing file")
+    include_references: bool = Field(
+        default=False,
+        description="When true and file_path is set, copy referenced assembly files into the target folder.",
+    )
+
+
+class PackAndGoInput(CompatInput):
+    """Input schema for Pack-and-Go assembly copy.
+
+    Attributes:
+        source_path (str): Path to the source assembly file.
+        target_dir (str): Destination directory for the self-contained copy.
+        export_preview (bool): Whether to export an isometric PNG preview.
+        overwrite (bool): Whether to overwrite files already in target_dir.
+    """
+
+    source_path: str = Field(description="Absolute path to the source .sldasm file")
+    target_dir: str = Field(
+        description="Directory where the assembly and all referenced parts will be copied"
+    )
+    export_preview: bool = Field(
+        default=True,
+        description="Export an isometric PNG preview next to the copied files",
+    )
+    overwrite: bool = Field(
+        default=False,
+        description="Overwrite files that already exist in target_dir",
+    )
+
+
+class ListFeaturesInput(CompatInput):
+    """Input schema for feature tree listing.
+
+    Attributes:
+        include_suppressed (bool): The include suppressed value.
+        max_assembly_depth (int): Sub-assembly recursion depth for Assembly
+            documents.
+    """
+
+    include_suppressed: bool = Field(
+        default=False,
+        description="Include suppressed features in the returned list",
+    )
+    max_assembly_depth: int = Field(
+        default=2,
+        description=(
+            "For Assembly documents, how many levels of sub-assembly to "
+            "recurse into when flattening component features. Ignored for "
+            "Part documents."
+        ),
+    )
+
+
+class ClassifyFeatureTreeInput(CompatInput):
+    """Input schema for feature-family classification.
+
+    Attributes:
+        features (list[dict[str, Any]] | None): The features value.
+        include_suppressed (bool): The include suppressed value.
+        model_info (dict[str, Any] | None): The model info value.
+    """
+
+    include_suppressed: bool = Field(
+        default=True,
+        description="Include suppressed features when reading the active model tree",
+    )
+    model_info: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional pre-fetched model info payload to classify without re-reading the active model",
+    )
+    features: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="Optional feature-tree payload to classify without re-reading the active model",
+    )
+
+
+class ActivateDocumentInput(CompatInput):
+    """Input schema for activating an already-open document.
+
+    Attributes:
+        title_or_path (str): Window title, full path, or file name of a
+            document that is already open in SolidWorks.
+    """
+
+    title_or_path: str = Field(
+        description=(
+            "Window title (e.g. 'bracket.SLDPRT'), full path, or bare file "
+            "name of a document that is already open"
+        )
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.title_or_path.strip():
+            raise ValueError("title_or_path is required")
+
+
+class SaveBodyAsPartInput(CompatInput):
+    """Input schema for extracting a solid body to its own part file.
+
+    Attributes:
+        body_name (str): Name of a solid body in the active multibody part.
+        file_path (str): Absolute path for the new ``.sldprt``.
+    """
+
+    body_name: str = Field(
+        description="Name of a solid body in the active part, e.g. 'Boss-Extrude1'"
+    )
+    file_path: str = Field(
+        description="Absolute path for the new .sldprt (parent directory must exist)"
+    )
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.body_name.strip():
+            raise ValueError("body_name is required")
+        if not self.file_path.strip():
+            raise ValueError("file_path is required")
+
+
+async def register_file_management_tools(
+    mcp: FastMCP, adapter: SolidWorksAdapter, config: dict[str, Any]
+) -> int:
+    """Register file management tools with FastMCP.
+
+    Registers essential file operations for SolidWorks document management including save
+    operations, file format conversions, and file property access. These tools provide
+    fundamental document lifecycle management capabilities.
+
+    Args:
+        mcp (FastMCP): The mcp value.
+        adapter (SolidWorksAdapter): Adapter instance used for the operation.
+        config (dict[str, Any]): Configuration values for the operation.
+
+    Returns:
+        int: The computed numeric result.
+
+    Example:
+                        ```python
+                        from solidworks_mcp.tools.file_management import register_file_management_tools
+
+                        tool_count = await register_file_management_tools(mcp, adapter, config)
+                        print(f"Registered {tool_count} file management tools")
+                        ```
+
+                    Note:
+                        File management tools require an active SolidWorks document.
+                        Save operations preserve the current document state and metadata.
+    """
+    tool_count = 0
+
+    def _coerce_input(model_cls: Any, payload: Any) -> Any:
+        """Accept legacy dict payloads from compatibility wrapper as well as model instances.
+
+        Args:
+            model_cls (Any): The model cls value.
+            payload (Any): The payload value.
+
+        Returns:
+            Any: The result produced by the operation.
+        """
+        return (
+            payload
+            if isinstance(payload, model_cls)
+            else model_cls.model_validate(payload)
+        )
+
+    def _result_value(payload: Any, *keys: str, default: Any = None) -> Any:
+        """Read a value from adapter result payloads that may be dicts or model objects.
+
+        Args:
+            payload (Any): The payload value.
+            *keys (str): Additional positional arguments forwarded to the call.
+            default (Any): Fallback value returned when the operation fails. Defaults to None.
+
+        Returns:
+            Any: The result produced by the operation.
+        """
+        if payload is None:
+            return default
+
+        if isinstance(payload, dict):
+            for key in keys:
+                if key in payload and payload[key] is not None:
+                    return payload[key]
+            return default
+
+        for key in keys:
+            value = getattr(payload, key, None)
+            if value is not None:
+                return value
+        return default
+
+    def _prepare_save_target(
+        raw_path: str,
+        *,
+        required_extension: str,
+        overwrite: bool,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        """Normalize and validate a save target before adapter/COM calls.
+
+        Enforces pre-save guardrails used by save convenience tools so invalid paths are
+        rejected consistently in both mock and real adapter modes. The helper performs:
+        path trimming, extension normalization, parent-directory existence check,
+        directory writability check, and overwrite policy enforcement.
+
+        Args:
+            raw_path (str): User-supplied path where the file should be saved.
+            required_extension (str): Required extension for the target document type
+                (for example, ``.sldprt`` or ``.sldasm``).
+            overwrite (bool): Whether saving is allowed to replace an existing file.
+
+        Returns:
+            tuple[str | None, dict[str, Any] | None]: A tuple where the first element is
+            the normalized save path string when validation succeeds, and the second element
+            is ``None``. When validation fails, the first element is ``None`` and the second
+            element is an error payload shaped like ``{"status": "error", "message": ...}``.
+
+        Example:
+            ```python
+            target, error = _prepare_save_target(
+                r"C:/Exports/bracket.step",
+                required_extension=".sldprt",
+                overwrite=False,
+            )
+
+            # target == "C:/Exports/bracket.sldprt" when valid
+            # error is populated when directory is missing/not writable,
+            # or when the target exists and overwrite is False.
+            ```
+
+        Note:
+            Validation is intentionally executed before adapter calls to avoid opaque COM
+            failures and to provide deterministic, user-friendly error messages.
+        """
+        file_path = raw_path.strip()
+        if not file_path:
+            return None, {
+                "status": "error",
+                "message": "Invalid file_path: path is empty or whitespace.",
+            }
+
+        cleaned = file_path.strip()
+        extension_name = required_extension.lstrip(".")
+        if (
+            cleaned.count(".") == 1
+            and cleaned.startswith(".")
+            and cleaned[1:].lower() == extension_name
+        ):
+            # Reject extension-only input such as ".sldprt".
+            return None, {
+                "status": "error",
+                "message": "Invalid file_path: missing base filename before extension.",
+            }
+
+        target = Path(file_path)
+        if target.suffix.lower() != required_extension.lower():
+            # Normalize extension so save_part/save_assembly always use their canonical type.
+            target = target.with_suffix(required_extension)
+
+        target_dir = target.parent
+        if not target_dir.exists():
+            return None, {
+                "status": "error",
+                "message": f"Target directory does not exist: {target_dir}",
+            }
+
+        if not target_dir.is_dir():
+            return None, {
+                "status": "error",
+                "message": f"Target parent path is not a directory: {target_dir}",
+            }
+
+        if not os.access(target_dir, os.W_OK):
+            return None, {
+                "status": "error",
+                "message": f"Target directory is not writable: {target_dir}",
+            }
+
+        if target.exists() and target.is_dir():
+            return None, {
+                "status": "error",
+                "message": f"Target path is a directory, expected file path: {target}",
+            }
+
+        if target.exists() and not overwrite:
+            return None, {
+                "status": "error",
+                "message": f"File already exists and overwrite=False: {target}. Set overwrite=True to replace it.",
+            }
+
+        return str(target), None
+
+    def _get_attr_or_call(  # pragma: no cover
+        obj: Any, name: str, default: Any = None
+    ) -> Any:
+        """Read COM values that may be exposed as either properties or methods."""
+        if obj is None:
+            return default
+        candidate = getattr(obj, name, None)
+        if candidate is None:
+            return default
+        if callable(candidate):
+            try:
+                value = candidate()
+            except Exception:
+                return default
+            return default if value is None else value
+        return candidate
+
+    def _extract_dependency_paths(  # pragma: no cover
+        raw_dependencies: Any,
+    ) -> list[Path]:
+        """Extract model file paths from SolidWorks GetDependencies2 payloads."""
+        if not isinstance(raw_dependencies, (list, tuple)):
+            return []
+
+        dependency_paths: list[Path] = []
+        for item in raw_dependencies:
+            if not isinstance(item, str):
+                continue
+            lower_item = item.lower()
+            if lower_item.endswith((".sldprt", ".sldasm", ".slddrw")):
+                dependency_paths.append(Path(item))
+        return dependency_paths
+
+    def _copy_with_collision_handling(  # pragma: no cover
+        source_path: Path, target_dir: Path
+    ) -> Path:
+        """Copy a source file into target_dir, suffixing when name collisions occur."""
+        destination = target_dir / source_path.name
+        try:
+            same_target = destination.exists() and source_path.resolve(
+                strict=False
+            ) == destination.resolve(strict=False)
+        except Exception:
+            same_target = False
+        if same_target:
+            return destination
+
+        if not destination.exists():
+            shutil.copy2(source_path, destination)
+            return destination
+
+        stem = source_path.stem
+        suffix = source_path.suffix
+        index = 1
+        while True:
+            candidate = target_dir / f"{stem}_{index}{suffix}"
+            if not candidate.exists():
+                shutil.copy2(source_path, candidate)
+                return candidate
+            index += 1
+
+    def _copy_active_assembly_with_references(  # pragma: no cover
+        target_assembly_path: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Copy active assembly and resolved dependencies into target folder."""
+        current_model = getattr(adapter, "currentModel", None)
+        if current_model is None:
+            return None, {
+                "status": "error",
+                "message": "No active model available to copy references.",
+            }
+
+        source_assembly_raw = _get_attr_or_call(current_model, "GetPathName")
+        source_assembly = (
+            Path(str(source_assembly_raw)) if source_assembly_raw else None
+        )
+        if source_assembly is None or not source_assembly.exists():
+            return None, {
+                "status": "error",
+                "message": "Active assembly must be saved before include_references=True can copy dependencies.",
+            }
+
+        target_assembly = Path(target_assembly_path)
+        target_dir = target_assembly.parent
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        dependency_callable = getattr(current_model, "GetDependencies2", None)
+        if not callable(dependency_callable):
+            return None, {
+                "status": "error",
+                "message": "Adapter does not expose GetDependencies2; cannot copy assembly references in this mode.",
+            }
+
+        try:
+            raw_dependencies = dependency_callable(True, True, False)
+        except Exception as exc:
+            return None, {
+                "status": "error",
+                "message": f"Failed to enumerate assembly dependencies: {exc}",
+            }
+
+        dependency_paths = _extract_dependency_paths(raw_dependencies)
+        unique_sources: list[Path] = [source_assembly]
+        for dep in dependency_paths:
+            if dep not in unique_sources:
+                unique_sources.append(dep)
+
+        copied_files: list[str] = []
+        missing_sources: list[str] = []
+
+        for source in unique_sources:
+            if not source.exists():
+                missing_sources.append(str(source))
+                continue
+
+            if source.resolve(strict=False) == source_assembly.resolve(strict=False):
+                shutil.copy2(source, target_assembly)
+                copied_files.append(str(target_assembly))
+            else:
+                copied_target = _copy_with_collision_handling(source, target_dir)
+                copied_files.append(str(copied_target))
+
+        copied_files = sorted(copied_files)
+        return {
+            "status": "success",
+            "message": f"Assembly and references copied to: {target_dir}",
+            "file_path": str(target_assembly),
+            "copied_file_count": len(copied_files),
+            "copied_files": copied_files,
+            "missing_source_files": missing_sources,
+            "copy_method": "tool_dependency_copy",
+        }, None
+
+    def _native_pack_and_go(  # pragma: no cover
+        target_assembly_path: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Try documented Pack-and-Go COM flow before fallback copy logic."""
+        current_model = getattr(adapter, "currentModel", None)
+        if current_model is None:
+            return None, "No active model available for Pack and Go."
+
+        target_assembly = Path(target_assembly_path)
+        target_dir = target_assembly.parent
+
+        model_ext = getattr(current_model, "Extension", None)
+        if model_ext is None:
+            return None, "Active model extension is not available for Pack and Go."
+
+        try:
+            from win32com.client import Dispatch
+
+            model_ext_typed = Dispatch(  # pragma: no cover
+                model_ext,
+                "IModelDocExtension",
+                "{99F4D4AF-F268-4EE1-8C55-041F7BECF879}",
+            )
+
+            # SolidWorks API docs sequence:
+            # GetPackAndGo -> SetSaveToName -> FlattenToSingleFolder -> SavePackAndGo
+            pack_and_go = model_ext_typed.GetPackAndGo()  # pragma: no cover
+            if pack_and_go is None:  # pragma: no cover
+                return None, "GetPackAndGo returned None."
+
+            set_path_ok = bool(
+                pack_and_go.SetSaveToName(True, str(target_dir))
+            )  # pragma: no cover
+            pack_and_go.FlattenToSingleFolder = True  # pragma: no cover
+            pack_and_go.IncludeDrawings = False  # pragma: no cover
+            pack_and_go.IncludeSimulationResults = False  # pragma: no cover
+            pack_and_go.IncludeToolboxComponents = True  # pragma: no cover
+
+            save_result = model_ext_typed.SavePackAndGo(pack_and_go)  # pragma: no cover
+            all_ok, status_warnings = _decode_pack_and_go_statuses(
+                save_result
+            )  # pragma: no cover
+
+            copied_files = sorted(str(p) for p in target_dir.rglob("*") if p.is_file())
+            if not copied_files:
+                return None, (
+                    "SavePackAndGo did not produce output files "
+                    f"(SetSaveToName={set_path_ok}, SavePackAndGo={save_result})."
+                )
+
+            # If Pack-and-Go emitted assembly using original name, align to requested name.
+            if not target_assembly.exists():
+                produced_assemblies = sorted(target_dir.glob("*.sldasm"))
+                if len(produced_assemblies) == 1:
+                    produced_assemblies[0].replace(target_assembly)
+                    copied_files = sorted(
+                        str(p) for p in target_dir.rglob("*") if p.is_file()
+                    )
+
+            return {
+                "status": "success",
+                "message": f"Assembly and references copied via native Pack and Go to: {target_dir}",
+                "file_path": str(target_assembly),
+                "copied_file_count": len(copied_files),
+                "copied_files": copied_files,
+                "all_files_saved": all_ok,
+                "save_status_warnings": status_warnings,
+                "missing_source_files": [],
+                "copy_method": "solidworks_pack_and_go_api",
+            }, None
+        except Exception as exc:
+            return None, str(exc)
+
+    @mcp.tool()
+    async def rebuild_model() -> dict[str, Any]:
+        """Rebuild the active SolidWorks document via ForceRebuild3.
+
+        Local SW2020 integration: expose the existing real COM adapter
+        operation so MCP hosts can explicitly rebuild without a macro or UI.
+        """
+        result = await adapter.rebuild_model()
+        return {
+            "status": "success" if result.is_success else "error",
+            "message": "ForceRebuild3 completed" if result.is_success else result.error,
+        }
+
+    @mcp.tool()
+    async def save_file(input_data: SaveFileInput) -> dict[str, Any]:
+        """Save the current SolidWorks model.
+
+        Saves the currently active SolidWorks document to its existing file location. Essential
+        for preserving work and maintaining document version control. Handles both modified and
+        unmodified documents based on force_save setting.
+
+        Args:
+            input_data (SaveFileInput): The input data value.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resulting values.
+
+        Example:
+                            ```python
+                            # Force save current model
+                            result = await save_file({"force_save": True})
+
+                            # Save only if modified
+                            result = await save_file({"force_save": False})
+
+                            if result["status"] == "success":
+                                print(f"File saved at {result['timestamp']}")
+                            ```
+
+                        Note:
+                            - Requires an open SolidWorks document
+                            - Preserves original file location and format
+                            - Updates document timestamp and metadata
+                            - No effect if document is read-only
+        """
+        try:
+            input_data = _coerce_input(SaveFileInput, input_data)
+            if hasattr(adapter, "save_file"):
+                result = await adapter.save_file(input_data.file_path)
+                if result.is_success:
+                    return {
+                        "status": "success",
+                        "message": "File saved successfully",
+                        "data": result.data,
+                        "execution_time": result.execution_time,
+                    }
+                return {
+                    "status": "error",
+                    "message": result.error or "Failed to save file",
+                }
+
+            return {
+                "status": "error",
+                "message": "Active adapter does not support save_file; the file was not saved.",
+            }
+
+        except Exception as e:
+            logger.error(f"Error in save_file tool: {e}")
+            return {
+                "status": "error",
+                "message": f"Unexpected error: {str(e)}",
+            }
+
+    @mcp.tool()
+    async def save_as(input_data: SaveAsInput) -> dict[str, Any]:
+        """Save the current model to a new location or format.
+
+        Saves the currently active SolidWorks document with a new filename, location, or file
+        format. Supports multiple export formats for interoperability with other CAD systems and
+        manufacturing workflows.
+
+        Args:
+            input_data (SaveAsInput): The input data value.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resulting values.
+
+        Example:
+                            ```python
+                            # Save as new SolidWorks file
+                            result = await save_as({
+                                "file_path": "C:/Projects/bracket_v2.sldprt",
+                                "format_type": "solidworks",
+                                "overwrite": False
+                            })
+
+                            # Export to STEP format
+                            result = await save_as({
+                                "file_path": "C:/Exports/bracket.step",
+                                "format_type": "step",
+                                "overwrite": True
+                            })
+
+                            # Export for 3D printing
+                            result = await save_as({
+                                "file_path": "C:/3DPrint/bracket.stl",
+                                "format_type": "stl"
+                            })
+                            ```
+        """
+        try:
+            input_data = _coerce_input(SaveAsInput, input_data)
+            if hasattr(adapter, "save_file") and input_data.format_type.lower() in {
+                "solidworks",
+                "sldprt",
+                "sldasm",
+                "slddrw",
+            }:
+                result = await adapter.save_file(input_data.file_path)
+                if result.is_success:
+                    return {
+                        "status": "success",
+                        "message": f"File saved as: {input_data.file_path}",
+                        "file_path": input_data.file_path,
+                        "format": input_data.format_type,
+                        "execution_time": result.execution_time,
+                    }
+                return {
+                    "status": "error",
+                    "message": result.error or "Failed to save file",
+                }
+
+            if hasattr(adapter, "export_file"):
+                result = await adapter.export_file(
+                    input_data.file_path,
+                    input_data.format_type,
+                )
+                if result.is_success:
+                    return {
+                        "status": "success",
+                        "message": f"File exported as: {input_data.file_path}",
+                        "file_path": input_data.file_path,
+                        "format": input_data.format_type,
+                        "execution_time": result.execution_time,
+                    }
+                return {
+                    "status": "error",
+                    "message": result.error or "Failed to export file",
+                }
+
+            return {
+                "status": "error",
+                "message": (
+                    "Active adapter does not support save_file or export_file; "
+                    f"no file was saved as {input_data.file_path}."
+                ),
+            }
+
+        except Exception as e:
+            logger.error(f"Error in save_as tool: {e}")
+            return {
+                "status": "error",
+                "message": f"Unexpected error: {str(e)}",
+            }
+
+    @mcp.tool()
+    async def get_file_properties() -> dict[str, Any]:
+        """Get properties of the current SolidWorks file.
+
+        Retrieves comprehensive metadata and properties of the currently active SolidWorks
+        document. Provides essential file information for document management, version control,
+        and project organization.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resulting values.
+
+        Example:
+                            ```python
+                            result = await get_file_properties()
+
+                            if result["status"] == "success":
+                                props = result["properties"]
+
+                                # Basic file info
+                                file_info = props["file_info"]
+                                print(f"File: {file_info['file_name']}")
+                                print(f"Size: {file_info['file_size']}")
+                                print(f"Type: {file_info['file_type']}")
+
+                                # Technical properties
+                                tech = props["technical_properties"]
+                                print(f"Material: {tech['material']}")
+                                print(f"Units: {tech['units']}")
+
+                                # Document info
+                                doc = props["document_info"]
+                                print(f"Author: {doc['author']}")
+                                print(f"Description: {doc['description']}")
+                            ```
+
+                        Note:
+                            - Requires an active SolidWorks document
+                            - Properties may vary based on document type
+                            - Some properties may be empty if not set
+                            - Technical properties depend on document configuration
+        """
+        try:
+            if not hasattr(adapter, "get_model_info"):
+                return {
+                    "status": "error",
+                    "message": "Active adapter does not support model metadata",
+                }
+
+            result = await adapter.get_model_info()
+            if not result.is_success or not isinstance(result.data, dict):
+                return {
+                    "status": "error",
+                    "message": result.error or "No active SolidWorks document",
+                }
+
+            model_info = dict(result.data)
+            raw_path = str(model_info.get("path") or "")
+            file_path = Path(raw_path) if raw_path else None
+            properties: dict[str, Any] = {
+                "file_name": (
+                    file_path.name
+                    if file_path is not None
+                    else str(model_info.get("title") or "")
+                ),
+                "file_path": raw_path,
+                "file_size_bytes": None,
+                "created_date": None,
+                "modified_date": None,
+                "document_type": model_info.get("type"),
+                "configuration": model_info.get("configuration"),
+                "is_dirty": model_info.get("is_dirty"),
+                "feature_count": model_info.get("feature_count"),
+            }
+
+            if file_path is not None and file_path.is_file():
+                stat = file_path.stat()
+                properties.update(
+                    {
+                        "file_size_bytes": stat.st_size,
+                        "created_date": stat.st_ctime,
+                        "modified_date": stat.st_mtime,
+                    }
+                )
+
+            return {
+                "status": "success",
+                "properties": properties,
+                "execution_time": result.execution_time,
+            }
+        except Exception as e:
+            logger.error(f"Error in get_file_properties tool: {e}")
+            return {
+                "status": "error",
+                "message": f"Unexpected error: {str(e)}",
+            }
+
+    @mcp.tool()
+    async def get_model_info() -> dict[str, Any]:
+        """Get metadata for the active SolidWorks document.
+
+        Returns a compact summary of the current model context that is useful for read-before-
+        write LLM flows (document type, active configuration, and feature count).
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resulting values.
+        """
+        try:
+            if hasattr(adapter, "get_model_info"):
+                result = await adapter.get_model_info()
+                if result.is_success:
+                    return {
+                        "status": "success",
+                        "model_info": result.data,
+                        "execution_time": result.execution_time,
+                    }
+                return {
+                    "status": "error",
+                    "message": result.error or "Failed to get model info",
+                }
+
+            return {
+                "status": "error",
+                "message": "Active adapter does not support get_model_info",
+            }
+        except Exception as e:
+            logger.error(f"Error in get_model_info tool: {e}")
+            return {
+                "status": "error",
+                "message": f"Unexpected error: {str(e)}",
+            }
+
+    @mcp.tool()
+    async def list_features(input_data: ListFeaturesInput) -> dict[str, Any]:
+        """List feature-tree entries for the active SolidWorks document.
+
+        Useful for read-before-write workflows where the agent must inspect existing model
+        structure before adding or editing downstream features.
+
+        Args:
+            input_data (ListFeaturesInput): The input data value.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resulting values.
+        """
+        try:
+            input_data = _coerce_input(ListFeaturesInput, input_data)
+            if hasattr(adapter, "list_features"):
+                result = await adapter.list_features(
+                    include_suppressed=input_data.include_suppressed,
+                    max_assembly_depth=input_data.max_assembly_depth,
+                )
+                if result.is_success:
+                    return {
+                        "status": "success",
+                        "features": result.data or [],
+                        "count": len(result.data or []),
+                        # Additive, derived view of the same flat "features"
+                        # list above - grouped by component/sub-component
+                        # for callers that want the assembly structure
+                        # rather than a flat tag-and-scan. Does not change
+                        # the meaning of "features"/"count".
+                        "assembly_tree": build_component_tree(result.data),
+                        "execution_time": result.execution_time,
+                    }
+                return {
+                    "status": "error",
+                    "message": result.error or "Failed to list features",
+                }
+
+            return {
+                "status": "error",
+                "message": "Active adapter does not support list_features",
+            }
+        except Exception as e:
+            logger.error(f"Error in list_features tool: {e}")
+            return {
+                "status": "error",
+                "message": f"Unexpected error: {str(e)}",
+            }
+
+    @mcp.tool()
+    async def classify_feature_tree(
+        input_data: ClassifyFeatureTreeInput,
+    ) -> dict[str, Any]:
+        """Classify the active model into a feature family from model-info and tree data.
+
+        This is a read-before-write helper for delegation. It summarizes whether the current
+        document looks like a direct-MCP solid, sheet metal workflow, advanced VBA-backed part,
+        assembly, drawing, or an insufficient-evidence case.
+
+        Args:
+            input_data (ClassifyFeatureTreeInput): The input data value.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resulting values.
+        """
+        try:
+            input_data = _coerce_input(ClassifyFeatureTreeInput, input_data)
+            model_info = input_data.model_info
+            features = input_data.features
+            execution_time = 0.0
+
+            if model_info is None and hasattr(adapter, "get_model_info"):
+                model_result = await adapter.get_model_info()
+                if model_result.is_success:
+                    model_info = model_result.data
+                    execution_time = max(
+                        execution_time, model_result.execution_time or 0.0
+                    )
+
+            if features is None:
+                if hasattr(adapter, "list_features"):
+                    feature_result = await adapter.list_features(
+                        include_suppressed=input_data.include_suppressed
+                    )
+                    if feature_result.is_success:
+                        features = feature_result.data or []
+                        execution_time = max(
+                            execution_time, feature_result.execution_time or 0.0
+                        )
+                    else:
+                        return {
+                            "status": "error",
+                            "message": feature_result.error
+                            or "Failed to list features for classification",
+                        }
+                else:
+                    return {
+                        "status": "error",
+                        "message": "Active adapter does not support list_features",
+                    }
+
+            classification = classify_feature_tree_snapshot(model_info, features or [])  # type: ignore[arg-type]
+            return {
+                "status": "success",
+                "classification": classification,
+                "model_info": model_info or {},
+                "features": features or [],
+                "execution_time": execution_time,
+            }
+        except Exception as e:
+            logger.error(f"Error in classify_feature_tree tool: {e}")
+            return {
+                "status": "error",
+                "message": f"Unexpected error: {str(e)}",
+            }
+
+    @mcp.tool()
+    async def list_configurations() -> dict[str, Any]:
+        """List configuration names for the active SolidWorks document.
+
+        Returns all available configuration names so callers can select a stable target before
+        invoking feature or export operations.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resulting values.
+        """
+        try:
+            if hasattr(adapter, "list_configurations"):
+                result = await adapter.list_configurations()
+                if result.is_success:
+                    return {
+                        "status": "success",
+                        "configurations": result.data or [],
+                        "count": len(result.data or []),
+                        "execution_time": result.execution_time,
+                    }
+                return {
+                    "status": "error",
+                    "message": result.error or "Failed to list configurations",
+                }
+
+            return {
+                "status": "error",
+                "message": "Active adapter does not support list_configurations",
+            }
+        except Exception as e:
+            logger.error(f"Error in list_configurations tool: {e}")
+            return {
+                "status": "error",
+                "message": f"Unexpected error: {str(e)}",
+            }
+
+    @mcp.tool()
+    async def manage_file_properties(input_data: FileOperationInput) -> dict[str, Any]:
+        """Read, update, copy, move, rename, or delete file-related properties.
+
+        Uses the requested operation and file paths to manage SolidWorks file metadata or
+        related file lifecycle tasks through the active adapter.
+
+        Args:
+            input_data (FileOperationInput): The input data value.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resulting values.
+        """
+        try:
+            input_data = _coerce_input(FileOperationInput, input_data)
+            if hasattr(adapter, "manage_file_properties"):
+                result = await adapter.manage_file_properties(input_data.model_dump())
+                if result.is_success:
+                    return {
+                        "status": "success",
+                        "message": "File properties managed successfully",
+                        "data": result.data,
+                        "execution_time": result.execution_time,
+                    }
+                return {
+                    "status": "error",
+                    "message": result.error or "Failed to manage file properties",
+                }
+            return {
+                "status": "error",
+                "message": (
+                    "Active adapter does not support manage_file_properties; "
+                    f"no {input_data.operation} operation was performed."
+                ),
+            }
+        except Exception as e:
+            logger.error(f"Error in manage_file_properties tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def convert_file_format(input_data: FormatConversionInput) -> dict[str, Any]:
+        """Convert a SolidWorks file from one format to another.
+
+        Supports exporting source files to target formats such as STEP, IGES, STL, PDF, or other
+        adapter-supported conversion outputs.
+
+        Args:
+            input_data (FormatConversionInput): The input data value.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resulting values.
+        """
+        try:
+            input_data = _coerce_input(FormatConversionInput, input_data)
+            if hasattr(adapter, "convert_file_format"):
+                result = await adapter.convert_file_format(input_data.model_dump())
+                if result.is_success:
+                    return {
+                        "status": "success",
+                        "message": "File converted successfully",
+                        "data": result.data,
+                        "execution_time": result.execution_time,
+                    }
+                return {
+                    "status": "error",
+                    "message": result.error or "Failed to convert file format",
+                }
+            return {
+                "status": "error",
+                "message": (
+                    "Active adapter does not support convert_file_format; "
+                    f"{input_data.source_file} was not converted."
+                ),
+            }
+        except Exception as e:
+            logger.error(f"Error in convert_file_format tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def batch_file_operations(input_data: FileOperationInput) -> dict[str, Any]:
+        """Run a file operation across multiple files as a batch workflow.
+
+        Intended for repetitive file management tasks such as copying, moving, renaming, or
+        deleting groups of SolidWorks documents.
+
+        Args:
+            input_data (FileOperationInput): The input data value.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resulting values.
+        """
+        try:
+            input_data = _coerce_input(FileOperationInput, input_data)
+            if hasattr(adapter, "batch_file_operations"):
+                result = await adapter.batch_file_operations(input_data.model_dump())
+                if result.is_success:
+                    return {
+                        "status": "success",
+                        "message": "Batch file operations completed successfully",
+                        "data": result.data,
+                        "execution_time": result.execution_time,
+                    }
+                return {
+                    "status": "error",
+                    "message": result.error or "Failed to run batch file operations",
+                }
+            return {
+                "status": "error",
+                "message": (
+                    "Active adapter does not support batch_file_operations; "
+                    f"no {input_data.operation} batch operation was performed."
+                ),
+            }
+        except Exception as e:
+            logger.error(f"Error in batch_file_operations tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def load_part(input_data: LoadPartInput) -> dict[str, Any]:
+        """Load (open) a SolidWorks part file.
+
+        Convenience wrapper that opens a .sldprt file and makes it the active document. Provides
+        a simpler alternative to open_model for parts.
+
+        Args:
+            input_data (LoadPartInput): The input data value.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resulting values.
+
+        Example:
+                            ```python
+                            result = await load_part({
+                                "file_path": "C:/Projects/bracket.sldprt"
+                            })
+
+                            if result["status"] == "success":
+                                print(f"Loaded: {result['model']['name']}")
+                            ```
+
+                        Note:
+                            - File must be a valid .sldprt (part) file
+                            - Path must be absolute and accessible
+        """
+        try:
+            input_data = _coerce_input(LoadPartInput, input_data)
+            # Ensure file path ends with .sldprt
+            file_path = input_data.file_path
+            if not file_path.lower().endswith(".sldprt"):
+                return {
+                    "status": "error",
+                    "message": f"File must be a .sldprt part file: {file_path}",
+                }
+
+            result = await adapter.open_model(file_path)
+            if result.is_success:
+                model = result.data
+                title = _result_value(model, "title", "name", default=file_path)
+                path = _result_value(model, "path", "file_path", default=file_path)
+                configuration = _result_value(model, "configuration", default="Default")
+                return {
+                    "status": "success",
+                    "message": f"Loaded part: {title}",
+                    "model": {
+                        "name": title,
+                        "type": "Part",
+                        "path": path,
+                        "configuration": configuration,
+                    },
+                    "execution_time": result.execution_time,
+                }
+            return {
+                "status": "error",
+                "message": f"Failed to load part: {result.error}",
+            }
+        except Exception as e:
+            logger.error(f"Error in load_part tool: {e}")
+            return {
+                "status": "error",
+                "message": f"Unexpected error: {str(e)}",
+            }
+
+    @mcp.tool()
+    async def load_assembly(input_data: LoadAssemblyInput) -> dict[str, Any]:
+        """Load (open) a SolidWorks assembly file.
+
+        Convenience wrapper that opens a .sldasm file and makes it the active document. Provides
+        a simpler alternative to open_model for assemblies.
+
+        Args:
+            input_data (LoadAssemblyInput): The input data value.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resulting values.
+
+        Example:
+                            ```python
+                            result = await load_assembly({
+                                "file_path": "C:/Projects/machine_assembly.sldasm"
+                            })
+
+                            if result["status"] == "success":
+                                print(f"Loaded: {result['model']['name']}")
+                            ```
+
+                        Note:
+                            - File must be a valid .sldasm (assembly) file
+                            - Path must be absolute and accessible
+        """
+        try:
+            input_data = _coerce_input(LoadAssemblyInput, input_data)
+            # Ensure file path ends with .sldasm
+            file_path = input_data.file_path
+            if not file_path.lower().endswith(".sldasm"):
+                return {
+                    "status": "error",
+                    "message": f"File must be a .sldasm assembly file: {file_path}",
+                }
+
+            result = await adapter.open_model(file_path)
+            if result.is_success:
+                model = result.data
+                title = _result_value(model, "title", "name", default=file_path)
+                path = _result_value(model, "path", "file_path", default=file_path)
+                configuration = _result_value(model, "configuration", default="Default")
+                return {
+                    "status": "success",
+                    "message": f"Loaded assembly: {title}",
+                    "model": {
+                        "name": title,
+                        "type": "Assembly",
+                        "path": path,
+                        "configuration": configuration,
+                    },
+                    "execution_time": result.execution_time,
+                }
+            return {
+                "status": "error",
+                "message": f"Failed to load assembly: {result.error}",
+            }
+        except Exception as e:
+            logger.error(f"Error in load_assembly tool: {e}")
+            return {
+                "status": "error",
+                "message": f"Unexpected error: {str(e)}",
+            }
+
+    @mcp.tool()
+    async def save_part(input_data: SavePartInput | None = None) -> dict[str, Any]:
+        """Save the active SolidWorks part document.
+
+        Convenience wrapper that saves the currently active part. If no file_path is provided,
+        saves to the existing location. Otherwise, saves as a new file.
+
+        Args:
+            input_data (SavePartInput | None): The input data value. Defaults to None.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resulting values.
+
+        Example:
+                            ```python
+                            # Save to current location
+                            result = await save_part()
+
+                            # Save as new file
+                            result = await save_part({
+                                "file_path": "C:/Projects/bracket_v2.sldprt",
+                                "overwrite": False
+                            })
+
+                            if result["status"] == "success":
+                                print(f"Part saved to {result['file_path']}")
+                            ```
+
+                        Note:
+                            - Active document must be a part file
+                            - When saving to new location, ensure path ends with .sldprt
+        """
+        try:
+            if input_data is None:
+                input_data = SavePartInput()
+            else:
+                input_data = _coerce_input(SavePartInput, input_data)
+
+            # If file_path provided, use save_as; otherwise use regular save
+            if input_data.file_path:
+                file_path, validation_error = _prepare_save_target(
+                    input_data.file_path,
+                    required_extension=".sldprt",
+                    overwrite=input_data.overwrite,
+                )
+                if validation_error is not None:
+                    return validation_error
+
+                result = await adapter.save_file(file_path)
+                if result.is_success:
+                    return {
+                        "status": "success",
+                        "message": f"Part saved as: {file_path}",
+                        "file_path": file_path,
+                        "execution_time": result.execution_time,
+                    }
+                return {
+                    "status": "error",
+                    "message": f"Failed to save part: {result.error}",
+                }
+            else:
+                # Save to current location
+                result = await adapter.save_file(None)
+                if result.is_success:
+                    return {
+                        "status": "success",
+                        "message": "Part saved successfully",
+                        "execution_time": result.execution_time,
+                    }
+                return {
+                    "status": "error",
+                    "message": f"Failed to save part: {result.error}",
+                }
+        except Exception as e:
+            logger.error(f"Error in save_part tool: {e}")
+            return {
+                "status": "error",
+                "message": f"Unexpected error: {str(e)}",
+            }
+
+    @mcp.tool()
+    async def save_assembly(
+        input_data: SaveAssemblyInput | None = None,
+    ) -> dict[str, Any]:
+        """Save the active SolidWorks assembly document.
+
+        Convenience wrapper that saves the currently active assembly. If no file_path is
+        provided, saves to the existing location. Otherwise, saves as a new file.
+
+        Args:
+            input_data (SaveAssemblyInput | None): The input data value. Defaults to None.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resulting values.
+
+        Example:
+                            ```python
+                            # Save to current location
+                            result = await save_assembly()
+
+                            # Save as new file
+                            result = await save_assembly({
+                                "file_path": "C:/Projects/machine_v2.sldasm",
+                                "overwrite": False
+                            })
+
+                            if result["status"] == "success":
+                                print(f"Assembly saved to {result['file_path']}")
+                            ```
+
+                        Note:
+                            - Active document must be an assembly file
+                            - When saving to new location, ensure path ends with .sldasm
+        """
+        try:
+            if input_data is None:
+                input_data = SaveAssemblyInput()
+            else:
+                input_data = _coerce_input(SaveAssemblyInput, input_data)
+
+            # If file_path provided, use save_as; otherwise use regular save
+            if input_data.file_path:
+                file_path, validation_error = _prepare_save_target(
+                    input_data.file_path,
+                    required_extension=".sldasm",
+                    overwrite=input_data.overwrite,
+                )
+                if validation_error is not None:
+                    return validation_error
+                assert (
+                    file_path is not None
+                )  # validation_error being None implies file_path is valid
+
+                if input_data.include_references:
+                    native_result, native_error = _native_pack_and_go(file_path)
+                    if native_result is not None:  # pragma: no cover
+                        return native_result
+
+                    copied_result, copy_error = _copy_active_assembly_with_references(
+                        file_path
+                    )  # pragma: no cover
+                    if copy_error is not None:  # pragma: no cover
+                        return copy_error  # pragma: no cover
+                    assert copied_result is not None  # pragma: no cover
+                    if native_error is not None:  # pragma: no cover
+                        copied_result["native_pack_and_go_error"] = (
+                            native_error  # pragma: no cover
+                        )
+                    return copied_result  # pragma: no cover
+
+                result = await adapter.save_file(file_path)
+                if result.is_success:
+                    return {
+                        "status": "success",
+                        "message": f"Assembly saved as: {file_path}",
+                        "file_path": file_path,
+                        "execution_time": result.execution_time,
+                    }
+                return {
+                    "status": "error",
+                    "message": f"Failed to save assembly: {result.error}",
+                }
+            else:
+                # Save to current location
+                result = await adapter.save_file(None)
+                if result.is_success:
+                    return {
+                        "status": "success",
+                        "message": "Assembly saved successfully",
+                        "execution_time": result.execution_time,
+                    }
+                return {
+                    "status": "error",
+                    "message": f"Failed to save assembly: {result.error}",
+                }
+        except Exception as e:
+            logger.error(f"Error in save_assembly tool: {e}")
+            return {
+                "status": "error",
+                "message": f"Unexpected error: {str(e)}",
+            }
+
+    @mcp.tool()
+    async def pack_and_go_assembly(
+        input_data: PackAndGoInput | None = None,
+    ) -> dict[str, Any]:
+        """Copy a SolidWorks assembly and all its referenced parts to a self-contained folder.
+
+        Enumerates every component referenced by the active assembly, copies the
+        assembly and each part into ``target_dir``, then rewrites the stored
+        component paths inside the copied assembly so it opens without any
+        dependency on the original file locations — equivalent to the SolidWorks
+        GUI Pack-and-Go operation.
+
+        Args:
+            input_data (PackAndGoInput | None): The input data value. Defaults to None.
+
+        Returns:
+            dict[str, Any]: A dictionary containing the resulting values.
+
+        Example:
+                            ```python
+                            result = await pack_and_go_assembly({
+                                "source_path": "C:/Projects/robot_arm.sldasm",
+                                "target_dir": "C:/Exports/robot_arm_pkg",
+                                "export_preview": True
+                            })
+
+                            if result["status"] == "success":
+                                print(result["copied_files"])
+                                print(result["all_files_saved"])
+                            ```
+
+                        Note:
+                            - SolidWorks must be open with the assembly loaded or openable
+                            - target_dir is created if it does not exist
+                            - Use overwrite=True to replace files in an existing target_dir
+        """
+        try:
+            if input_data is None:
+                input_data = PackAndGoInput(source_path="", target_dir="")
+            else:
+                input_data = _coerce_input(PackAndGoInput, input_data)
+
+            from pathlib import Path as _Path
+
+            source = _Path(input_data.source_path)
+            out_dir = _Path(input_data.target_dir)
+
+            if not source.exists():
+                return {
+                    "status": "error",
+                    "message": f"Source assembly not found: {source}",
+                }
+
+            if not source.suffix.lower() == ".sldasm":
+                return {
+                    "status": "error",
+                    "message": f"source_path must be a .sldasm file, got: {source.suffix}",
+                }
+
+            if not input_data.overwrite and out_dir.exists() and any(out_dir.iterdir()):
+                return {
+                    "status": "error",
+                    "message": (
+                        f"target_dir already contains files: {out_dir}. "
+                        "Set overwrite=True to replace them."
+                    ),
+                }
+
+            result = await adapter.pack_and_go_assembly(  # type: ignore[attr-defined]
+                source_path=str(source),
+                target_dir=str(out_dir),
+            )
+
+            if not result.is_success:
+                return {"status": "error", "message": result.error}
+
+            report: dict[str, Any] = {
+                "status": "success",
+                "method": "native_pack_and_go",
+                "execution_time": result.execution_time,
+                **result.data,
+            }
+
+            if input_data.export_preview:
+                preview_path = out_dir / "assembly_preview.png"
+                img_result = await adapter.export_image(
+                    {
+                        "file_path": str(preview_path),
+                        "format_type": "png",
+                        "width": 1600,
+                        "height": 1000,
+                        "view_orientation": "isometric",
+                    }
+                )
+                report["preview_image"] = (
+                    str(preview_path) if img_result.is_success else None
+                )
+
+            return report
+
+        except Exception as e:
+            logger.error(f"Error in pack_and_go_assembly tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def list_open_documents() -> dict[str, Any]:
+        """List every SolidWorks document that is currently open.
+
+        Read-only — does not change which document is active. Use it to
+        discover what is open (an assembly plus its parts, a drawing plus its
+        model) before switching with ``activate_document``.
+
+        Returns:
+            dict[str, Any]: ``status`` and ``documents`` — a list of
+            ``{title, path, type, is_active}`` entries, plus ``count``.
+
+        Example:
+            ```python
+            await list_open_documents()
+            ```
+        """
+        try:
+            result = await adapter.list_open_documents()
+            if result.is_success:
+                docs = result.data if isinstance(result.data, list) else []
+                active = next(
+                    (d.get("title") for d in docs if d.get("is_active")), None
+                )
+                return {
+                    "status": "success",
+                    "message": (
+                        f"{len(docs)} document(s) open"
+                        + (f"; active: {active}" if active else "")
+                    ),
+                    "documents": docs,
+                    "count": len(docs),
+                    "execution_time": result.execution_time,
+                }
+            return {
+                "status": "error",
+                "message": f"Failed to list open documents: {result.error}",
+            }
+        except Exception as e:
+            logger.error(f"Error in list_open_documents tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def activate_document(
+        input_data: ActivateDocumentInput,
+    ) -> dict[str, Any]:
+        """Switch which open document is the active one.
+
+        Matches the argument against open documents by title, full path, or
+        file name (case-insensitive), calls ``ActivateDoc3``, and reads the
+        active document back to confirm the switch took.
+
+        Args:
+            input_data (ActivateDocumentInput): Which document to activate.
+
+        Returns:
+            dict[str, Any]: Status and the title switched to.
+
+        Example:
+            ```python
+            await activate_document({"title_or_path": "bracket.SLDPRT"})
+            ```
+        """
+        try:
+            input_data = _coerce_input(ActivateDocumentInput, input_data)
+            result = await adapter.activate_document(input_data.title_or_path)
+            if result.is_success:
+                data = result.data if isinstance(result.data, dict) else {}
+                activated = data.get("activated", input_data.title_or_path)
+                message = f"Activated {activated}"
+                if data.get("verified") is None:
+                    message += " (could not be read back to confirm)"
+                return {
+                    "status": "success",
+                    "message": message,
+                    "data": data,
+                    "execution_time": result.execution_time,
+                }
+            return {
+                "status": "error",
+                "message": f"Failed to activate document: {result.error}",
+            }
+        except Exception as e:
+            logger.error(f"Error in activate_document tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    @mcp.tool()
+    async def save_body_as_part(
+        input_data: SaveBodyAsPartInput,
+    ) -> dict[str, Any]:
+        """Extract one solid body from the active multibody part to a new file.
+
+        Runs SolidWorks' Save Bodies on a single named body, writing a
+        standalone part to ``file_path``. The body is matched by name against
+        the active part's solid bodies; the response lists every solid body
+        found, so an unknown name reports the real options. Success is
+        confirmed by the file existing on disk afterwards.
+
+        Args:
+            input_data (SaveBodyAsPartInput): The body name and target path.
+
+        Returns:
+            dict[str, Any]: Status, the written path, and the solid-body list.
+
+        Example:
+            ```python
+            await save_body_as_part({
+                "body_name": "Boss-Extrude1",
+                "file_path": "C:/parts/bracket_body.sldprt"
+            })
+            ```
+        """
+        try:
+            if not hasattr(adapter, "save_body_as_part"):
+                return {
+                    "status": "error",
+                    "message": (
+                        "Active adapter does not support save_body_as_part; "
+                        "no file was written."
+                    ),
+                }
+            input_data = _coerce_input(SaveBodyAsPartInput, input_data)
+            result = await adapter.save_body_as_part(
+                input_data.body_name, input_data.file_path
+            )
+            if result.is_success:
+                data = result.data if isinstance(result.data, dict) else {}
+                return {
+                    "status": "success",
+                    "message": (
+                        f"Saved body {input_data.body_name} to "
+                        f"{data.get('file_path', input_data.file_path)}"
+                    ),
+                    "data": data,
+                    "execution_time": result.execution_time,
+                }
+            return {
+                "status": "error",
+                "message": f"Failed to save body as part: {result.error}",
+            }
+        except Exception as e:
+            logger.error(f"Error in save_body_as_part tool: {e}")
+            return {"status": "error", "message": f"Unexpected error: {str(e)}"}
+
+    tool_count = 18  # Total number of registered tools in this module
+    return tool_count

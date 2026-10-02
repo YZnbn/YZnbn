@@ -1,0 +1,42 @@
+﻿name: CI
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Miniconda
+        uses: conda-incubator/setup-miniconda@v4
+        with:
+          auto-activate-base: false
+          activate-environment: solidworks_mcp
+          environment-file: solidworks_mcp.yml
+
+      - name: Install package
+        shell: bash -el {0}
+        run: conda run -n solidworks_mcp pip install -e ".[dev,docs,ui]"
+
+      - name: Run tests
+        shell: bash -el {0}
+        run: make test
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+          verbose: true

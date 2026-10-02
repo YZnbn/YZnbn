@@ -1,0 +1,128 @@
+"""Authentication and authorization for SolidWorks MCP Server."""
+
+import secrets
+from collections.abc import Awaitable, Callable
+from functools import wraps
+from typing import Any, TypeVar, cast
+
+from ..config import SolidWorksMCPConfig
+
+F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
+
+
+def setup_authentication(mcp: Any, config: SolidWorksMCPConfig) -> None:
+    """Configure authentication middleware hooks.
+
+    Args:
+        mcp (Any): The mcp value.
+        config (SolidWorksMCPConfig): Configuration values for the operation.
+
+    Returns:
+        None: None.
+    """
+    api_key = getattr(config, "api_key", None)
+    api_keys = getattr(config, "api_keys", [])
+    api_key_required = bool(getattr(config, "api_key_required", False))
+    auth_mode = "api_key" if (api_key or api_keys or api_key_required) else "none"
+    try:
+        mcp._security_auth_enabled = True
+        mcp._security_auth_mode = auth_mode
+    except (AttributeError, TypeError):
+        # Some tests intentionally pass plain object() instances without __dict__.
+        return
+
+
+def validate_api_key(provided_key: str, expected_key: str) -> bool:
+    """Validate API key using constant-time comparison.
+
+    Args:
+        provided_key (str): The provided key value.
+        expected_key (str): The expected key value.
+
+    Returns:
+        bool: True if validate api key, otherwise False.
+    """
+    if not provided_key or not expected_key:
+        return False
+
+    return secrets.compare_digest(provided_key, expected_key)
+
+
+def require_auth(config: SolidWorksMCPConfig) -> Callable[[F], F]:
+    """Decorate a coroutine with authentication checks.
+
+    Args:
+        config (SolidWorksMCPConfig): Configuration values for the operation.
+
+    Returns:
+        Callable[[F], F]: The result produced by the operation.
+    """
+
+    def decorator(func: F) -> F:
+        """Wrap a coroutine with request-level authentication checks.
+
+        Args:
+            func (F): The func value.
+
+        Returns:
+            F: The result produced by the operation.
+
+        Raises:
+            RuntimeError: Authentication failed: invalid api_key.
+        """
+
+        @wraps(func)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            """Run the wrapped coroutine after API key validation.
+
+            Args:
+                *args (Any): Additional positional arguments forwarded to the call.
+                **kwargs (Any): Additional keyword arguments forwarded to the call.
+
+            Returns:
+                Any: The result produced by the operation.
+
+            Raises:
+                RuntimeError: Authentication failed: invalid api_key.
+            """
+            security_level = str(getattr(config, "security_level", "minimal"))
+            if security_level == "minimal":
+                return await func(*args, **kwargs)
+
+            api_key_required = bool(getattr(config, "api_key_required", False))
+            api_key = getattr(config, "api_key", None)
+            api_keys = getattr(config, "api_keys", [])
+            if not (api_key_required or api_key or api_keys):
+                return await func(*args, **kwargs)
+
+            payload = kwargs.get("input_data")
+            if payload is None and args:
+                payload = args[0]
+
+            payload_dict: dict[str, Any] = {}
+            if payload is not None and hasattr(payload, "model_dump"):
+                payload_dict = cast(dict[str, Any], payload.model_dump())
+            elif isinstance(payload, dict):
+                payload_dict = payload
+
+            provided_key_value = payload_dict.get("api_key")
+            provided_key = str(provided_key_value) if provided_key_value else ""
+
+            expected_key = ""
+            if api_key is not None and hasattr(api_key, "get_secret_value"):
+                expected_key = api_key.get_secret_value()
+            elif isinstance(api_key, str):
+                expected_key = api_key
+            elif api_keys:
+                expected_key = api_keys[0]
+
+            if not validate_api_key(
+                provided_key=provided_key, expected_key=expected_key
+            ):
+                raise RuntimeError("authentication failed: invalid api_key")
+
+            return await func(*args, **kwargs)
+
+        return wrapper  # type: ignore[return-value]
+
+    return decorator

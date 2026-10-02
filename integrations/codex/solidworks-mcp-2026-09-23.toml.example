@@ -1,0 +1,10 @@
+[mcp_servers.solidworks]
+tool_timeout_sec = 120
+startup_timeout_sec = 120
+cwd = '<REPO_ROOT>\SolidworksMCP-python'
+command = '<REPO_ROOT>\SolidworksMCP-python\.venv\Scripts\python.exe'
+args = ['<REPO_ROOT>\SolidworksMCP-python\src\utils\start_sw2020_stable.py', "--real", "--year", "2020"]
+
+[mcp_servers.solidworks.env]
+PYTHONIOENCODING = "utf-8"
+PYTHONUNBUFFERED = "1"

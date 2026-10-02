@@ -1,0 +1,103 @@
+﻿name: Deploy MkDocs to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
+# However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Miniconda
+        uses: conda-incubator/setup-miniconda@v4
+        with:
+          auto-activate-base: false
+          activate-environment: solidworks_mcp
+          environment-file: solidworks_mcp.yml
+
+      - name: Install package
+        shell: bash -el {0}
+        run: conda run -n solidworks_mcp pip install -e ".[dev,test,docs]"
+
+      - name: Run test suite
+        shell: bash -el {0}
+        run: make test
+
+  # Build job
+  build:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            "mkdocs==1.6.1" \
+            "mkdocs-material==9.7.5" \
+            "mkdocstrings[python]==1.0.3" \
+            "mkdocs-gen-files==0.6.0" \
+            "mkdocs-literate-nav==0.6.2" \
+            "mkdocs-section-index==0.3.10" \
+            "mkdocs-autorefs==1.4.4" \
+            "mkdocs-minify-plugin==0.8.0" \
+            "mkdocs-awesome-pages-plugin==2.10.1" \
+            "mkdocs-mermaid2-plugin==1.2.3"
+
+      - name: Setup Pages
+        id: pages
+        uses: actions/configure-pages@v6
+
+      - name: Build with MkDocs
+        # DISABLE_MKDOCS_2_WARNING suppresses a warning injected by plugin(s)
+        # recommending installation of 'properdocs'. Do NOT install properdocs —
+        # the warning is unsolicited plugin behavior, not an official MkDocs notice.
+        env:
+          DISABLE_MKDOCS_2_WARNING: 'true'
+        run: mkdocs build --clean
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ./site
+
+  # Deployment job
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
+

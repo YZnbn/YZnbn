@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "solidworks-mcp": {
+      "command": "powershell",
+      "args": [
+        "-NoProfile",
+        "-File",
+        ".\\deployment\\run-sw2020-mcp.ps1"
+      ]
+    }
+  }
+}

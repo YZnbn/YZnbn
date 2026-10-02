@@ -1,0 +1,99 @@
+# Dependencies
+node_modules/
+yarn.lock
+pnpm-lock.yaml
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+info/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+
+# Testing
+coverage/
+.nyc_output
+
+# State files
+.solidworks-state.json
+*.state.json
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+.tmp_diag_*.py
+
+# npm pack output
+*.tgz
+
+# Python virtualenv (for any Python integrations)
+venv/
+__pycache__/
+*.pyc
+EOF < /dev/null
+.prettierrc
+
+# docs folder (if built locally)
+site/
+coverage.xml
+.coverage
+.coverage.*
+
+# Generated test artifacts
+tests/.generated/
+
+# Runtime-generated agent / cache artifacts
+.generated/
+.solidworks_mcp/
+htmlcov/
+.playwright-mcp/
+tmp/ui_smoke/
+
+# Claude local settings (personal, machine-specific)
+.claude/*
+!.claude/commands/
+!.claude/commands/**
+!.claude/skills/
+!.claude/skills/**
+
+# random mypy artifacts
+mypy_*
+
+.mypy_cache/
+uv.lock
+.venv
+.venv/
+
+# Live-demo artefacts produced by scripts/demo_sketches.py
+out/

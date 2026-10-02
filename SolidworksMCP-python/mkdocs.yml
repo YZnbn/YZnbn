@@ -1,0 +1,220 @@
+site_name: SolidWorks MCP Server
+site_url: https://andrewbartels1.github.io/SolidworksMCP-python
+site_description: Python MCP server for SolidWorks automation with 132 tools
+strict: false
+
+# Repository
+repo_name: SolidworksMCP-python
+repo_url: https://github.com/andrewbartels1/SolidworksMCP-python
+edit_uri: edit/main/docs/
+
+# Validation
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+# Navigation
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quick Start: getting-started/quickstart.md
+      - Tutorial Tracks: getting-started/tutorial-tracks.md
+      - SolidWorks as Code: getting-started/solidworks-as-code.md
+      - U-Joint Assembly Build (From Scratch): getting-started/tutorials/u-joint-assembly-build.md
+      - U-Joint Rebuild Prompts (Reference): getting-started/tutorial-parts/u_joint_rebuild_prompt.md
+      - "Smart Dimensions, Reference Points, Save Bodies & Centre Marks": getting-started/tutorials/wave3-reference-geometry-and-drawings.md
+      - VS Code MCP Setup: getting-started/vscode-mcp-setup.md
+      - Claude Code MCP Setup: getting-started/claude-code-setup.md
+      - Local LLM (Ollama / Gemma): getting-started/local-llm.md
+  - MCP Server Guide:
+      - Architecture: user-guide/architecture.md
+      - Tools Overview: user-guide/tools-overview.md
+      - Platform and Connectivity: user-guide/platform-connectivity.md
+      - Prompting Best Practices: user-guide/prompting-best-practices.md
+      - Integration Testing: user-guide/integration-testing.md
+      - Real Tool Validation Matrix: user-guide/real-tool-validation-matrix.md
+      - SolidWorks UI + LLM Tutorial: user-guide/solidworks-ui-llm-tutorial.md
+      - Screenshot Equivalence Workflow: user-guide/screenshot-equivalence.md
+  - Tool Catalog:
+      - All Tools: user-guide/tool-catalog/index.md
+      - Modeling: user-guide/tool-catalog/modeling.md
+      - Sketching: user-guide/tool-catalog/sketching.md
+      - Drawing: user-guide/tool-catalog/drawing.md
+      - Drawing Analysis: user-guide/tool-catalog/drawing-analysis.md
+      - Analysis: user-guide/tool-catalog/analysis.md
+      - Export: user-guide/tool-catalog/export.md
+      - File Management: user-guide/tool-catalog/file-management.md
+      - Automation: user-guide/tool-catalog/automation.md
+      - VBA Generation: user-guide/tool-catalog/vba-generation.md
+      - Template Management: user-guide/tool-catalog/template-management.md
+      - Macro Recording: user-guide/tool-catalog/macro-recording.md
+      - Docs Discovery: user-guide/tool-catalog/docs-discovery.md
+  - Agents and Skills:
+      - Agents and Prompt Testing: agents/agents-and-testing.md
+      - Family-Gated Tool Routing: agents/family-gated-tool-routing.md
+      - PydanticAI and Schemas: agents/pydantic-ai-and-schemas.md
+      - Agent Memory and Recovery: agents/agent-memory-and-recovery.md
+      - Agent UI Workflows: agents/agent-ui-workflows.md
+      - Logging and Agent Invocation: agents/logging-and-agent-invocation.md
+      - Reverse-Engineering Workflow: agents/reverse-engineering-workflow.md
+      - Sample Models Guide: agents/sample-models-guide.md
+      - Worked Examples: agents/worked-examples.md
+      - Prompt-Driven Design: agents/prompt-driven-design.md
+      - Prompting Tutorials: agents/prompting-tutorials.md
+      - COM API Pitfalls (LLM Agent Guide): agents/com-api-pitfalls.md
+  - Planning:
+      - Roadmap: planning/roadmap.md
+      - SolidWorks API Coverage: planning/solidworks-api-coverage.md
+  - API Reference: api/
+
+# Theme configuration
+theme:
+  name: material
+  features:
+    - announce.dismiss
+    - content.action.edit
+    - content.action.view
+    - content.code.annotate
+    - content.code.copy
+    - content.code.select
+    - content.tabs.link
+    - content.tooltips
+    - navigation.path
+    - navigation.footer
+    - navigation.indexes
+    - navigation.sections
+    - navigation.tabs
+    - navigation.tracking
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme)"
+      primary: blue
+      accent: indigo
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+  font:
+    text: Roboto
+    code: Roboto Mono
+
+# Watch additional docs-related paths during local development
+watch:
+  - docs
+  - src/solidworks_mcp
+
+# Plugins
+plugins:
+  - search:
+      separator: '[\s\u200b\-_,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
+  - awesome-pages
+  - gen-files:
+      scripts:
+        - docs/gen_ref_pages.py
+  - literate-nav:
+      nav_file: SUMMARY.md
+  - section-index
+  - mkdocstrings:
+      enabled: true
+      default_handler: python
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            show_category_heading: true
+            merge_init_into_class: true
+            show_signature: true
+            show_signature_annotations: true
+            separate_signature: true
+
+# Extensions
+markdown_extensions:
+  - tables
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.emoji:
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+  - pymdownx.highlight:
+      guess_lang: false
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.magiclink:
+      repo_url_shorthand: true
+      user: andrewbartels1
+      repo: SolidworksMCP-python
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.snippets:
+      base_path: ['.']
+      check_paths: false
+  - pymdownx.tilde
+  - sane_lists
+
+# Extra
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/andrewbartels1/SolidworksMCP-python
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/solidworks-mcp/
+  generator: false
+  version:
+    provider: mike
+
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+# Copyright
+copyright: |
+  &copy; 2024 SolidWorks MCP Server Contributors

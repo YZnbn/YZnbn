@@ -1,0 +1,4 @@
+interface:
+  display_name: "SolidWorks 2020 建模"
+  short_description: "通过真实 API 建模、参考图重建并验证可编辑的 SW2020 原生特征"
+  default_prompt: "使用 $solidworks-2020-modeling 完成当前建模任务，保留原件并验证真实特征和关键参数。"

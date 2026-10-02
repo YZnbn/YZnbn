@@ -1,0 +1,96 @@
+# Tutorial Tracks
+
+Build SolidWorks parts from scratch using the MCP server and Python scripting.
+
+## Track A: Script-Based Part Generation
+
+Best for automated, reproducible builds with direct Python scripting.
+
+**Example:** Build the sample U-bracket from measured sketch coordinates:
+
+```powershell
+.\.venv\Scripts\python.exe docs/getting-started/tutorial-parts/build_u_bracket_artifact.py
+```
+
+This generates `tutorial-parts/u_bracket_from_prompt.SLDPRT` and an isometric PNG alongside the SolidWorks answer-key render for visual comparison.
+
+**Advantages:**
+- Fast, deterministic output
+- Repeatable across runs
+- Full control over feature sequence
+- Easy to version-control and share
+
+**Best for:** CI/CD pipelines, automated testing, generating baseline artifacts
+
+---
+
+## Track B: SolidWorks-as-Code (SoC) Export
+
+Best for capturing a live MCP session as a replayable Python script.
+
+After building a part interactively through MCP tool calls, export the session log as a clean script:
+
+```python
+from solidworks_mcp.agents.soc_exporter import export_session
+
+export_session(session_id="...", output_path="my_part.py")
+```
+
+The exported script mirrors the structure of `build_u_bracket_artifact.py` — adapter calls, sketch sequences, extrusion parameters — ready to replay or version-control.
+
+**Best for:** Capturing design intent, sharing reproducible builds, checkpoint rewind
+
+---
+
+## Choosing Your Track
+
+| Goal | Track | Reason |
+|------|-------|--------|
+| Build a known part | A (Script) | Fast, repeatable, CI-ready |
+| Capture a live session | B (SoC Export) | Turn interactive work into a script |
+| Bulk generation | A (Script) | Automation, minimal overhead |
+
+---
+
+## Available Tutorials
+
+### Prompt-Driven Walkthroughs
+
+**[Smart Dimensions, Reference Points, Save Bodies & Centre Marks](tutorials/wave3-reference-geometry-and-drawings.md)**
+— a live MCP session (real SolidWorks 2026, real screenshots) driving
+`add_sketch_dimension`, `create_reference_point`, `save_body_as_part`, and
+`auto_center_marks` entirely from plain-language prompts. Includes the exact
+prompt text, the tool calls each one triggers, and the gotchas (origin-plane
+picks, entity-ID rules, count read-back).
+
+### Reference Artifacts
+
+**U-Bracket Build Script** — Builds the SolidWorks 2026 sample bracket from measured sketch coordinates; produces `.sldprt` and isometric PNG
+
+[⬇ Download Script](tutorial-parts/build_u_bracket_artifact.py){ .md-button .md-button--primary download="" }
+
+??? example "View full script — `build_u_bracket_artifact.py`"
+    ```python
+    --8<-- "docs/getting-started/tutorial-parts/build_u_bracket_artifact.py"
+    ```
+
+### Guided Prompt Packs
+
+**U-Joint Rebuild Prompts** — Pre-written prompts for rebuilding the U-joint if you already have reference samples
+
+[⬇ Download Prompts](tutorial-parts/u_joint_rebuild_prompt.md){ .md-button .md-button--primary download="" }
+
+??? example "View full prompt pack — `u_joint_rebuild_prompt.md`"
+    --8<-- "docs/getting-started/tutorial-parts/u_joint_rebuild_prompt.md"
+
+---
+
+## Getting Started
+
+Run the reference artifact to verify your MCP setup is working:
+
+```powershell
+.\.venv\Scripts\python.exe docs/getting-started/tutorial-parts/build_u_bracket_artifact.py
+```
+
+A successful run produces `tutorial-parts/u_bracket_from_prompt.SLDPRT` and two PNG images.

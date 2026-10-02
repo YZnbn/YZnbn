@@ -1,0 +1,4 @@
+interface:
+  display_name: "SolidWorks MCP 开发"
+  short_description: "开发与排查 SW2020 MCP 工具、COM 懒连接、协议及调用恢复"
+  default_prompt: "使用 $solidworks-mcp-development 处理当前 MCP 问题，检查相关实现并验证受影响的运行约束。"

@@ -1,0 +1,107 @@
+# Real SolidWorks Tool Validation Matrix
+
+This page documents what is validated with real SolidWorks and what is still simulated.
+
+## Validation Model
+
+The project uses two layers:
+
+1. Catalog validation for all registered tools.
+2. Real execution smoke workflows for core CAD lifecycle paths.
+
+This split keeps tests deterministic and maintainable while still validating real COM connectivity.
+
+## What Works Today
+
+- Tool registration and catalog snapshots.
+- Real part, assembly, and sketch lifecycle smoke flows.
+- Real COM connectivity on Windows with SolidWorks installed.
+- Targeted real-SolidWorks tests for individual tools:
+  `tests/live/test_live_sw_regression.py` (sketch geometry, patterns, mirror,
+  offset), `tests/live/test_live_sw_wave2.py` (`set_units`, `rename_feature`,
+  `list_open_documents`, `activate_document`) and
+  `tests/live/test_live_sw_wave3.py` (`create_reference_point`,
+  `save_body_as_part`, `auto_center_marks`). All are gated behind
+  `SOLIDWORKS_MCP_RUN_REAL_INTEGRATION=1`; the wave files only ever close
+  never-saved scratch documents (and delete any file they wrote), so they
+  are safe to run against a session with real work open.
+
+## What Is Still Simulated
+
+- Mock adapter outputs: the mock adapter is the local test/dev replacement for SolidWorks COM. It returns canned responses so unit tests and offline workflows can run without SolidWorks, but it does not validate a real CAD result.
+- Some UI preview and checkpoint paths.
+- Scenario-specific automation and macro behavior that would be flaky in unattended runs.
+
+## Layer 1: All-Tools Catalog Validation
+
+Implemented in real integration tests by checking:
+
+- The server registers the full tool catalog.
+- Tool names are unique.
+- Core tool names across all major categories exist.
+- A local snapshot JSON is written under tests/.generated/solidworks_integration.
+
+What this guarantees:
+
+- No silent tool-registration regressions.
+- No accidental tool-name collisions.
+
+## Layer 2: Real Execution Smoke Workflows
+
+Executed against a live SolidWorks session:
+
+- Part create/save/open/save/close flow.
+- Assembly create/save flow.
+- Cross-category smoke flow (part + sketch + save lifecycle).
+
+What this guarantees:
+
+- End-to-end COM connectivity on real SolidWorks.
+- Deterministic basic lifecycle behavior for users and tutorials.
+
+## Why Not Execute Every Tool in One Real Test Run
+
+Not all tools are equally deterministic in unattended runs:
+
+- Some require rich model preconditions (existing sketches, references, or drawing views).
+- Some are macro/file-system heavy and intentionally scenario-specific.
+- Some are best validated with targeted unit tests plus focused integration scenarios.
+
+The repo already includes broad unit coverage by tool category under tests/test_tools_*.py.
+
+## Run Commands
+
+Default fast run:
+
+```bash
+make test
+```
+
+Full run including real SolidWorks integration:
+
+```bash
+make test-full
+```
+
+Manual cleanup:
+
+```bash
+make test-clean
+```
+
+## Environment Requirements
+
+- Windows 10/11.
+- Local SolidWorks installation.
+- SolidWorks launchable and COM-accessible.
+- SOLIDWORKS_MCP_RUN_REAL_INTEGRATION=true (handled by make test-full).
+
+## Expected Generated Artifacts
+
+During full runs:
+
+- tests/.generated/solidworks_integration/*.sldprt
+- tests/.generated/solidworks_integration/*.sldasm
+- tests/.generated/solidworks_integration/tool_catalog_snapshot.json
+
+Cleanup is performed by tests/scripts/cleanup_generated_integration_artifacts.py.

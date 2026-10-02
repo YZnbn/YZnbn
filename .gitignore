@@ -1,0 +1,26 @@
+# Python environments and generated files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+coverage.xml
+build/
+dist/
+
+# Local secrets, logs, and machine-specific settings
+.env
+.env.*
+!.env.example
+*.log
+*.local.toml
+
+# CAD exports and generated model data
+*.sldprt
+*.sldasm
+*.slddrw
+*.step
+*.stp
