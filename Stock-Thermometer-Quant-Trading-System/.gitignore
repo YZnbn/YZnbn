@@ -1,0 +1,26 @@
+# Python runtime files
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Downloaded market data and generated runtime state
+cache/
+*.db
+*.sqlite
+*.sqlite3
+*.pkl
+factor_history.json
+simulation/state.json
+
+# Local configuration, diagnostics, and build artifacts
+.env
+.env.*
+!.env.example
+config.local.yaml
+*.log
+check_result.txt
+tk_test.log
+screenshot*.png
+build/
+dist/

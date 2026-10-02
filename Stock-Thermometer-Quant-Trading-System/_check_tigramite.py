@@ -1,0 +1,1 @@
+import tigramite; print("OK", tigramite.__version__)
